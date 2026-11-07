@@ -1,8 +1,8 @@
 /* Service worker: guarda la app en el dispositivo para que funcione sin conexión. Sube VERSION en cada cambio. */
-const VERSION = "presupuestos-v1";
+const VERSION = "presupuestos-v2";
 const FILES = [
-  "./", "./index.html", "./app.js", "./app.css", "./manifest.webmanifest",
-  "./vendor/jspdf.umd.min.js",
+  "./", "./index.html", "./login.js", "./main.js", "./app.js", "./app.css", "./manifest.webmanifest",
+  "./vendor/jspdf.umd.min.js", "./vendor/pdf-fonts.js",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/icon-maskable-512.png", "./icons/apple-touch-icon.png", "./icons/favicon-32.png",
   "./fonts/cormorant-garamond-latin-400-italic.woff2",
   "./fonts/cormorant-garamond-latin-400-normal.woff2",
