@@ -37,12 +37,22 @@ El service worker necesita HTTPS (GitHub Pages ya lo da).
 
 Todo se guarda **en el propio dispositivo** (no hay servidor). Cada móvil tiene su catálogo y sus presupuestos.
 
-- *Catálogo → Exportar copia* descarga un `.json` con catálogo, cláusula y presupuestos guardados.
-- *Catálogo → Importar copia* sustituye el catálogo y añade los presupuestos de la copia.
+- *Catálogo → Exportar copia* descarga un `.json` con catálogo, cláusula y presupuestos. Por defecto se **cifra** con una contraseña (AES-GCM + PBKDF2); sin ella no se puede leer.
+- *Catálogo → Importar copia* sustituye el catálogo y añade los presupuestos. Todo lo importado se valida y se limpia antes de usarse.
 - Haz una copia de vez en cuando: si se borran los datos del navegador o se cambia de móvil, se pierden.
 
-**No subas copias de datos (`*.json` con presupuestos) al repositorio**: si es público, cualquiera puede verlas.
+**No subas copias de datos (`*.json`) al repositorio**: es público.
 
 ## Acceso
 
-El inicio de sesión es solo una barrera visual: la huella de la contraseña está en el código, que en una web pública es visible. No protege los datos; lo que protege los presupuestos es que viven solo en el móvil.
+- Acceso inicial: usuario **Olga**. En el código solo está la huella PBKDF2 de la contraseña inicial, nunca la contraseña.
+- En el primer acceso de cada dispositivo la app obliga a crear una contraseña propia (mínimo 8 caracteres), que se guarda solo en ese móvil.
+- Tras 5 fallos seguidos hay que esperar, cada vez más.
+- *He olvidado la contraseña* borra los datos de ese dispositivo y vuelve al acceso inicial (por eso conviene tener copias).
+- Para cambiar el acceso inicial, cambia `ACCESO_INICIAL` en `login.js` (ver comentario del archivo).
+
+## Seguridad
+
+- `index.html` declara una política de seguridad de contenidos (CSP): solo se ejecuta código de la propia app, sin scripts en línea ni de terceros.
+- Ninguna librería se carga de internet: jsPDF (4.2.1, sin vulnerabilidades conocidas en `npm audit`) y las tipografías van en `vendor/` y `fonts/`.
+- La app se niega a mostrarse dentro de un marco de otra web.
