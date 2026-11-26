@@ -1,5 +1,5 @@
 /* Service worker: guarda la app en el dispositivo para que funcione sin conexión. Sube VERSION en cada cambio. */
-const VERSION = "presupuestos-v3";
+const VERSION = "presupuestos-v4";
 const FILES = [
   "./", "./index.html", "./login.js", "./main.js", "./app.js", "./app.css", "./manifest.webmanifest",
   "./vendor/jspdf.umd.min.js", "./vendor/pdf-fonts.js",
