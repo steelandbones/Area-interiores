@@ -41,8 +41,11 @@ function exampleCatalog() {
 let catalog = exampleCatalog();
 const DEFAULT_CLAUSE = "Este presupuesto es aproximado y se ha elaborado con la información disponible en el momento de la visita. El importe final puede variar por imprevistos que surjan durante la ejecución de la obra (estado de instalaciones, soportes o elementos ocultos) o por las adaptaciones que sea necesario realizar. Cualquier variación se comunicará y valorará con el cliente antes de ejecutarse.";
 let clausula = DEFAULT_CLAUSE;
-// Presupuesto en curso: borrador por navegador. sel[id] = { on, qty, linked }
-let draft = { sel: {}, cliente: "", obra: "", fecha: new Date().toLocaleDateString("es-ES"), iva: "21", gg: 0 };
+// Presupuesto en curso: borrador por navegador. Un presupuesto tiene secciones (estancias: baño, cocina...),
+// cada una con su propia selección sel[id] = { on, qty, linked }. cur = sección que se está editando.
+const newSec = (nombre = "") => ({ id: "s" + uid(), nombre, sel: {} });
+let draft = { secs: [newSec()], cur: null, cliente: "", obra: "", fecha: new Date().toLocaleDateString("es-ES"), iva: "21", gg: 0 };
+const SEC_SUGGEST = ["Cuarto de baño", "Aseo", "Cocina", "Salón", "Comedor", "Dormitorio principal", "Dormitorio", "Pasillo", "Recibidor", "Terraza", "Lavadero", "Fachada", "Zonas comunes"];
 let db = null;
 const CAT_DOC = "config/catalogo";
 
@@ -73,11 +76,22 @@ function cleanSel(o) {
   if (o && typeof o === "object") for (const [k, v] of Object.entries(o)) if (safeKey(k) && v && typeof v === "object") out[k] = { on: !!v.on, qty: cleanNum(v.qty), linked: v.linked !== false };
   return out;
 }
+// Secciones guardadas; los presupuestos antiguos (un único sel) se convierten en una sola sección sin nombre.
+function cleanSecs(arr, legacySel) {
+  const seen = new Set();
+  const out = (Array.isArray(arr) ? arr.slice(0, 40) : []).filter(x => x && typeof x === "object").map(x => {
+    let id = typeof x.id === "string" && safeKey(x.id) && !seen.has(x.id) ? x.id : "s" + uid();
+    seen.add(id);
+    return { id, nombre: cleanStr(x.nombre, 80), sel: cleanSel(x.sel) };
+  });
+  return out.length ? out : [{ id: "s" + uid(), nombre: "", sel: cleanSel(legacySel) }];
+}
 function cleanBudget(b) {
   if (!b || typeof b !== "object") return null;
+  const secs = cleanSecs(b.secs, b.sel);
   return { cliente: cleanStr(b.cliente, 200), obra: cleanStr(b.obra, 300), fecha: cleanStr(b.fecha, 40), gg: cleanNum(b.gg), base: cleanNum(b.base), total: cleanNum(b.total),
-    created: cleanNum(b.created), updated: cleanNum(b.updated), sel: cleanSel(b.sel),
-    lineas: (Array.isArray(b.lineas) ? b.lineas.slice(0, 1000) : []).filter(l => l && typeof l === "object").map(l => ({ cap: cleanStr(l.cap, 80), child: !!l.child, nombre: cleanStr(l.nombre, 200), precio: cleanNum(l.precio), qty: cleanNum(l.qty), unidad: UNITS.includes(l.unidad) ? l.unidad : "ud" })) };
+    created: cleanNum(b.created), updated: cleanNum(b.updated), secs,
+    lineas: (Array.isArray(b.lineas) ? b.lineas.slice(0, 1000) : []).filter(l => l && typeof l === "object").map(l => ({ cap: cleanStr(l.cap, 80), child: !!l.child, nombre: cleanStr(l.nombre, 200), precio: cleanNum(l.precio), qty: cleanNum(l.qty), unidad: UNITS.includes(l.unidad) ? l.unidad : "ud", sid: typeof l.sid === "string" && safeKey(l.sid) ? l.sid : "", sec: cleanStr(l.sec, 80) })) };
 }
 function cleanSaved(o) {
   const out = {};
@@ -92,7 +106,7 @@ function toast(msg) { const t = $("toast"); t.textContent = msg; t.hidden = fals
 function loadDraft() {
   try {
     const d = JSON.parse(localStorage.getItem("presu-draft") || "null");
-    if (d && typeof d === "object") Object.assign(draft, { sel: cleanSel(d.sel), cliente: cleanStr(d.cliente, 200), obra: cleanStr(d.obra, 300), fecha: cleanStr(d.fecha, 40) || draft.fecha, gg: cleanNum(d.gg), seeded: !!d.seeded, created: cleanNum(d.created) || undefined, docId: typeof d.docId === "string" && safeKey(d.docId) ? d.docId : null });
+    if (d && typeof d === "object") Object.assign(draft, { secs: cleanSecs(d.secs, d.sel), cur: typeof d.cur === "string" ? d.cur : null, cliente: cleanStr(d.cliente, 200), obra: cleanStr(d.obra, 300), fecha: cleanStr(d.fecha, 40) || draft.fecha, gg: cleanNum(d.gg), seeded: !!d.seeded, created: cleanNum(d.created) || undefined, docId: typeof d.docId === "string" && safeKey(d.docId) ? d.docId : null });
   } catch (e) {}
   try { const c = cleanCatalog(JSON.parse(localStorage.getItem("presu-cat") || "null")); if (c) catalog = c; } catch (e) {}
   try { const k = localStorage.getItem("presu-clausula"); if (k !== null) clausula = cleanStr(k, 4000); } catch (e) {}
@@ -137,25 +151,45 @@ async function connectDb() {
 }
 
 // ---------- cálculo ----------
-function sel(id) { return draft.sel[id] || (draft.sel[id] = { on: false, qty: 0, linked: true }); }
+function curSec() { return draft.secs.find(x => x.id === draft.cur) || draft.secs[0]; }
+const S = () => curSec().sel;
+// hay secciones "de verdad" cuando hay más de una o la única tiene nombre; si no, el presupuesto se ve como siempre
+const multi = () => draft.secs.length > 1 || !!(draft.secs[0].nombre || "").trim();
+const secName = (x, i = draft.secs.indexOf(x)) => (x.nombre || "").trim() || "Sección " + (i + 1);
+function sel(id) { const m = S(); return m[id] || (m[id] = { on: false, qty: 0, linked: true }); }
 function computeLines() {
   const out = [];
-  for (const p of catalog) {
-    const s = draft.sel[p.id];
-    if (!s || !s.on) continue;
-    out.push({ nombre: p.nombre, unidad: p.unidad, qty: num(s.qty), precio: num(p.precio), cap: p.cap });
-    for (const h of p.hijos || []) {
-      const hs = draft.sel[h.id];
-      if (hs && hs.on) out.push({ nombre: h.nombre, unidad: h.unidad, qty: num(hs.qty), precio: num(h.precio), cap: p.cap, child: true });
+  draft.secs.forEach((x, i) => {
+    const m = x.sel, sec = secName(x, i);
+    for (const p of catalog) {
+      const s = m[p.id];
+      if (!s || !s.on) continue;
+      out.push({ nombre: p.nombre, unidad: p.unidad, qty: num(s.qty), precio: num(p.precio), cap: p.cap, sid: x.id, sec });
+      for (const h of p.hijos || []) {
+        const hs = m[h.id];
+        if (hs && hs.on) out.push({ nombre: h.nombre, unidad: h.unidad, qty: num(hs.qty), precio: num(h.precio), cap: p.cap, child: true, sid: x.id, sec });
+      }
     }
-  }
+  });
   return out;
+}
+// agrupa las líneas por sección y capítulo, conservando el orden
+function groupLines(lines) {
+  const secs = [];
+  for (const l of lines) {
+    let g = secs[secs.length - 1];
+    if (!g || g.sid !== l.sid) secs.push(g = { sid: l.sid, sec: l.sec, total: 0, caps: [] });
+    let c = g.caps[g.caps.length - 1];
+    if (!c || c.cap !== l.cap) g.caps.push(c = { cap: l.cap, total: 0, lines: [] });
+    const t = l.qty * l.precio; c.lines.push(l); c.total += t; g.total += t;
+  }
+  return secs;
 }
 function updateTotals() {
   const lines = computeLines();
   let sum = 0;
-  const caps = {};
-  lines.forEach(l => { const t = l.qty * l.precio; sum += t; caps[l.cap] = (caps[l.cap] || 0) + t; });
+  const caps = {}, secT = {}, cs = curSec().id;
+  lines.forEach(l => { const t = l.qty * l.precio; sum += t; secT[l.sid] = (secT[l.sid] || 0) + t; if (l.sid === cs) caps[l.cap] = (caps[l.cap] || 0) + t; });
   const gg = sum * num(draft.gg) / 100;
   const base = sum + gg;
   const iva = base * IVA / 100;
@@ -164,13 +198,14 @@ function updateTotals() {
   $("t-base").textContent = eur(base);
   $("t-ivav").textContent = eur(iva);
   $("t-total").textContent = eur(base + iva);
-  const capNames = Object.keys(caps);
-  $("lines").innerHTML = capNames.length
-    ? capNames.map(c => `<div><span>${esc(c)}</span><span>${eur(caps[c])}</span></div>`).join("")
-    : `<div class="empty">Marca alguna partida para empezar.</div>`;
+  const groups = groupLines(lines);
+  $("lines").innerHTML = !groups.length ? `<div class="empty">Marca alguna partida para empezar.</div>`
+    : multi() ? groups.map(g => `<div class="sec-sum"><span>${esc(g.sec)}</span><span>${eur(g.total)}</span></div>` + g.caps.map(c => `<div class="sec-cap"><span>${esc(c.cap || "Sin capítulo")}</span><span>${eur(c.total)}</span></div>`).join("")).join("")
+    : groups[0].caps.map(c => `<div><span>${esc(c.cap || "Sin capítulo")}</span><span>${eur(c.total)}</span></div>`).join("");
+  document.querySelectorAll("[data-secsum]").forEach(el => el.textContent = eur(secT[el.dataset.secsum] || 0));
   document.querySelectorAll("[data-capsum]").forEach(el => el.textContent = caps[el.dataset.capsum] ? eur(caps[el.dataset.capsum]) : "");
   document.querySelectorAll("[data-sub]").forEach(el => {
-    const id = el.dataset.sub, item = findItem(id), s = draft.sel[id];
+    const id = el.dataset.sub, item = findItem(id), s = S()[id];
     el.textContent = s && s.on ? eur(num(s.qty) * num(item.precio)) : "—";
   });
   return { lines, sum, gg, base, iva };
@@ -192,7 +227,48 @@ function rowHtml(item, child) {
     <div class="sub-total" data-sub="${esc(item.id)}">—</div>
   </div>`;
 }
+function renderSecbar() {
+  const cs = curSec(), n = draft.secs.length;
+  $("secbar").innerHTML = `<div class="sec-head"><span class="fieldlabel">Secciones del presupuesto</span>
+      <span class="sec-help">${multi() ? "Cada sección tiene sus propias partidas y su subtotal." : "Divide el presupuesto por estancias: cuarto de baño, cocina, salón…"}</span></div>
+    <div class="sec-tabs" role="tablist" aria-label="Secciones">${draft.secs.map((x, i) => `
+      <button class="sec-tab" role="tab" data-sec="${esc(x.id)}" aria-selected="${x.id === cs.id}"><span class="sec-no">${String(i + 1).padStart(2, "0")}</span><span class="sec-nm" data-secname="${esc(x.id)}">${esc(secName(x, i))}</span><span class="sec-amt" data-secsum="${esc(x.id)}"></span></button>`).join("")}
+      <button class="btn ghost" id="sec-add">+ Añadir sección</button>
+    </div>
+    <div class="sec-edit">
+      <label>Nombre de la sección<input type="text" id="sec-name" list="sec-list" maxlength="80" value="${esc(cs.nombre)}" placeholder="${esc(n > 1 ? "Ej.: Cuarto de baño" : "Ej.: Cuarto de baño (opcional)")}"></label>
+      <datalist id="sec-list">${SEC_SUGGEST.map(x => `<option value="${esc(x)}">`).join("")}</datalist>
+      ${n > 1 ? `<span id="sec-del-slot"><button class="btn danger" id="sec-del">Eliminar sección</button></span>` : ""}
+    </div>`;
+}
+$("secbar").addEventListener("click", e => {
+  const t = e.target.closest("button"); if (!t) return;
+  if (t.dataset.sec) { draft.cur = t.dataset.sec; saveDraft(); renderPresupuesto(); return; }
+  if (t.id === "sec-add") {
+    if (draft.secs.length >= 40) { toast("Máximo 40 secciones"); return; }
+    const x = newSec(); draft.secs.push(x); draft.cur = x.id; saveDraft(); renderPresupuesto();
+    const inp = $("sec-name"); inp.focus(); toast("Sección añadida: ponle nombre y marca sus partidas");
+    return;
+  }
+  if (t.id === "sec-del") {
+    const x = curSec(), has = Object.values(x.sel).some(v => v.on);
+    const del = () => { const i = draft.secs.indexOf(x); draft.secs.splice(i, 1); draft.cur = draft.secs[Math.max(0, i - 1)].id; saveDraft(); renderPresupuesto(); toast("Sección eliminada"); };
+    if (!has) { del(); return; }
+    $("sec-del-slot").innerHTML = `<span class="confirm">¿Eliminar «${esc(secName(x))}» y sus partidas? <button class="btn danger" data-secyes="1">Eliminar</button><button class="btn" data-secno="1">Cancelar</button></span>`;
+    return;
+  }
+  if (t.dataset.secyes) { const x = curSec(), i = draft.secs.indexOf(x); draft.secs.splice(i, 1); draft.cur = draft.secs[Math.max(0, i - 1)].id; saveDraft(); renderPresupuesto(); toast("Sección eliminada"); return; }
+  if (t.dataset.secno) renderSecbar(), updateTotals();
+});
+$("secbar").addEventListener("input", e => {
+  if (e.target.id !== "sec-name") return;
+  const x = curSec(); x.nombre = e.target.value.slice(0, 80);
+  const el = document.querySelector(`[data-secname="${CSS.escape(x.id)}"]`); if (el) el.textContent = secName(x);
+  saveDraft(); updateTotals();
+});
 function renderPresupuesto() {
+  if (!draft.secs.some(x => x.id === draft.cur)) draft.cur = draft.secs[0].id;
+  renderSecbar();
   const caps = [];
   catalog.forEach(p => { if (!caps.includes(p.cap)) caps.push(p.cap); });
   $("chapters").innerHTML = caps.map((c, ci) => `<div class="chapter"><h2><span><span class="no">${String(ci + 1).padStart(2, "0")}</span>${esc(c || "Sin capítulo")}</span><span data-capsum="${esc(c)}"></span></h2><div class="items">${
@@ -242,12 +318,16 @@ $("copy").addEventListener("click", () => {
   if (draft.obra) L.push("Obra: " + draft.obra);
   if (draft.fecha) L.push("Fecha: " + draft.fecha);
   L.push("");
-  let cap = null;
-  lines.forEach(l => {
-    if (l.cap !== cap) { cap = l.cap; L.push("— " + (cap || "Sin capítulo").toUpperCase()); }
-    L.push(`${l.child ? "   · " : " · "}${l.nombre}: ${String(l.qty).replace(".", ",")} ${l.unidad} × ${eur(l.precio)} = ${eur(l.qty * l.precio)}`);
+  const groups = groupLines(lines), many = multi();
+  groups.forEach(g => {
+    if (many) L.push("=== " + g.sec.toUpperCase() + " ===");
+    g.caps.forEach(c => {
+      L.push("— " + (c.cap || "Sin capítulo").toUpperCase());
+      c.lines.forEach(l => L.push(`${l.child ? "   · " : " · "}${l.nombre}: ${String(l.qty).replace(".", ",")} ${l.unidad} × ${eur(l.precio)} = ${eur(l.qty * l.precio)}`));
+    });
+    if (many) { L.push(`Subtotal ${g.sec}: ${eur(g.total)}`); L.push(""); }
   });
-  L.push("");
+  if (!many) L.push("");
   L.push("Suma de partidas: " + eur(sum));
   if (gg) L.push(`Gastos generales y beneficio (${draft.gg} %): ${eur(gg)}`);
   L.push("Base imponible: " + eur(base));
@@ -315,14 +395,26 @@ async function makePdf() {
   };
   const room = need => { if (y + need > 272) { doc.addPage(); y = 20; header(); } };
   header();
-  let cap = null, capNo = 0;
-  for (const l of lines) {
-    if (l.cap !== cap) {
-      cap = l.cap; capNo++; room(12);
-      y += 1; doc.setFontSize(8.5); doc.setFont("helvetica", "bold"); doc.setTextColor(...oak);
-      doc.text(String(capNo).padStart(2, "0") + "   " + (cap || "Sin capítulo").toUpperCase(), M, y, { charSpace: 0.6 });
-      doc.setFont("helvetica", "normal"); y += 6;
-    }
+  const groups = groupLines(lines), many = multi();
+  for (const [gi, g] of groups.entries()) {
+  if (many) {
+    room(26);
+    if (gi) y += 3;
+    doc.setFillColor(...cream); doc.rect(M, y - 5.5, R - M, 9, "F");
+    doc.setFillColor(...gold); doc.rect(M, y - 5.5, 1.2, 9, "F");
+    doc.setFont(serif, "normal"); doc.setFontSize(13); doc.setTextColor(...ink);
+    doc.text(g.sec, M + 5, y + 0.6);
+    doc.setFont("helvetica", "normal"); doc.setFontSize(7); doc.setTextColor(...oak);
+    doc.text("SECCIÓN " + String(gi + 1).padStart(2, "0"), R - 3, y + 0.4, { align: "right", charSpace: 0.6 });
+    y += 10;
+  }
+  let capNo = 0;
+  for (const c of g.caps) {
+    capNo++; room(12);
+    y += 1; doc.setFontSize(8.5); doc.setFont("helvetica", "bold"); doc.setTextColor(...oak);
+    doc.text(String(capNo).padStart(2, "0") + "   " + (c.cap || "Sin capítulo").toUpperCase(), M, y, { charSpace: 0.6 });
+    doc.setFont("helvetica", "normal"); y += 6;
+  for (const l of c.lines) {
     doc.setFontSize(l.child ? 8.5 : 9.5); doc.setTextColor(...(l.child ? muted : ink));
     const indent = l.child ? 5 : 0;
     const d = doc.splitTextToSize((l.child ? "- " : "") + l.nombre, cols.qty - 16 - M - indent);
@@ -335,9 +427,25 @@ async function makePdf() {
     doc.text(money(l.qty * l.precio), cols.imp, y, { align: "right" });
     y += d.length * 4.4 + 2.2;
   }
+  }
+  if (many) {
+    room(10);
+    doc.setDrawColor(...line); doc.setLineWidth(0.2); doc.line(120, y - 1, R, y - 1); y += 3.5;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(...ink);
+    doc.text("Subtotal " + g.sec, 120, y); doc.text(money(g.total), R, y, { align: "right" });
+    doc.setFont("helvetica", "normal"); y += 7;
+  }
+  }
   // totales
-  room(48);
+  room(48 + (many ? groups.length * 6 + 10 : 0));
   y += 2; doc.setDrawColor(...line); doc.line(M, y, R, y); y += 8;
+  if (many) {
+    doc.setFont("helvetica", "bold"); doc.setFontSize(7.5); doc.setTextColor(...oak);
+    doc.text("RESUMEN POR SECCIONES", 120, y, { charSpace: 0.6 }); y += 6;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9.5); doc.setTextColor(...muted);
+    for (const g of groups) { doc.text(doc.splitTextToSize(g.sec, 52)[0], 120, y); doc.text(money(g.total), R, y, { align: "right" }); y += 5.5; }
+    doc.setDrawColor(...line); doc.line(120, y - 2, R, y - 2); y += 4;
+  }
   const tx = 120;
   const tot = (label, val, bold) => {
     doc.setFont("helvetica", bold ? "bold" : "normal"); doc.setFontSize(10); doc.setTextColor(...ink);
@@ -399,11 +507,14 @@ const store = {
 };
 function budgetData() {
   const t = updateTotals();
-  const sel = {};
-  for (const [k, v] of Object.entries(draft.sel)) if (v.on || num(v.qty)) sel[k] = { on: !!v.on, qty: v.qty === undefined ? 0 : v.qty, linked: v.linked !== false };
+  const secs = draft.secs.map(x => {
+    const sel = {};
+    for (const [k, v] of Object.entries(x.sel)) if (v.on || num(v.qty)) sel[k] = { on: !!v.on, qty: v.qty === undefined ? 0 : v.qty, linked: v.linked !== false };
+    return { id: x.id, nombre: x.nombre || "", sel };
+  });
   return {
-    cliente: draft.cliente || "", obra: draft.obra || "", fecha: draft.fecha || "", gg: num(draft.gg), sel,
-    lineas: t.lines.map(l => ({ cap: l.cap, nombre: l.nombre, unidad: l.unidad, qty: l.qty, precio: l.precio, child: !!l.child })),
+    cliente: draft.cliente || "", obra: draft.obra || "", fecha: draft.fecha || "", gg: num(draft.gg), secs,
+    lineas: t.lines.map(l => ({ cap: l.cap, nombre: l.nombre, unidad: l.unidad, qty: l.qty, precio: l.precio, child: !!l.child, sid: l.sid, sec: multi() ? l.sec : "" })),
     base: Math.round(t.base * 100) / 100, total: Math.round((t.base + t.iva) * 100) / 100,
     created: draft.created || Date.now(), updated: Date.now()
   };
@@ -440,10 +551,14 @@ $("save-b").addEventListener("click", async () => {
   try { await store.put(draft.docId, budgetData()); saveDraft(); budState = ""; budList = await store.list().catch(() => budList); renderDocState(); toast("Presupuesto guardado"); }
   catch (e) { draft.docId = null; renderDocState(); toast("No se pudo guardar el presupuesto"); }
 });
-function remapSel(b) {
+function remapSecs(b) {
+  const secs = cleanSecs(b.secs, b.sel), all = b.lineas || [];
+  const legacy = !(Array.isArray(b.secs) && b.secs.length);
+  return secs.map((x, i) => ({ id: x.id, nombre: x.nombre, sel: remapSel(x.sel, legacy ? all : all.filter(l => l.sid ? l.sid === x.id : i === 0)) }));
+}
+function remapSel(src, lines) {
   const sel = {};
-  for (const [k, v] of Object.entries(b.sel || {})) if (findItem(k)) sel[k] = Object.assign({}, v);
-  const lines = b.lineas || [];
+  for (const [k, v] of Object.entries(src || {})) if (findItem(k)) sel[k] = Object.assign({}, v);
   const found = Object.values(sel).filter(v => v.on).length;
   if (lines.length && found < lines.length) {
     // partidas guardadas con ids antiguos: se recuperan por nombre
@@ -458,7 +573,8 @@ function remapSel(b) {
   return sel;
 }
 function applyBudget(id, b, quiet) {
-  draft = { sel: remapSel(b), cliente: b.cliente || "", obra: b.obra || "", fecha: b.fecha || "", iva: "21", gg: b.gg || 0, docId: id, created: b.created, seeded: true };
+  const secs = remapSecs(b);
+  draft = { secs, cur: secs[0].id, cliente: b.cliente || "", obra: b.obra || "", fecha: b.fecha || "", iva: "21", gg: b.gg || 0, docId: id, created: b.created, seeded: true };
   fillMeta();
   try { localStorage.setItem("presu-draft", JSON.stringify(draft)); } catch (e) {}
   budState = "";
@@ -468,7 +584,8 @@ function applyBudget(id, b, quiet) {
   if (missing > 0) toast(`${missing} partida(s) ya no están en el catálogo`);
 }
 function newBudget() {
-  draft = { sel: {}, cliente: "", obra: "", fecha: new Date().toLocaleDateString("es-ES"), iva: "21", gg: 0, docId: null, seeded: true };
+  const x = newSec();
+  draft = { secs: [x], cur: x.id, cliente: "", obra: "", fecha: new Date().toLocaleDateString("es-ES"), iva: "21", gg: 0, docId: null, seeded: true };
   fillMeta(); saveDraft(); renderPresupuesto();
 }
 function fillMeta() { $("m-cliente").value = draft.cliente; $("m-obra").value = draft.obra; $("m-fecha").value = draft.fecha; $("t-gg").value = draft.gg; }
@@ -489,7 +606,7 @@ function drawList() {
   $("list").innerHTML = `<div class="bl">${rows.length ? rows.map(b => `
     <div class="bl-row ${b.id === draft.docId ? "current" : ""}" data-b="${esc(b.id)}">
       <div class="who">${esc(b.cliente || "Sin nombre")}${b.id === draft.docId ? ' <span class="pill">Abierto</span>' : ""}</div>
-      <div class="what">${esc(b.obra || "—")}<br><span class="when">${esc(b.fecha || "")} · ${(b.lineas || []).length} partidas · editado ${ago(b.updated)}</span></div>
+      <div class="what">${esc(b.obra || "—")}<br><span class="when">${esc(b.fecha || "")} · ${(b.secs || []).length > 1 ? b.secs.length + " secciones · " : ""}${(b.lineas || []).length} partidas · editado ${ago(b.updated)}</span></div>
       <div class="when">Base ${eur(b.base || 0)}</div>
       <div class="amt">${eur(b.total || 0)}</div>
       <div class="acts" id="acts-${esc(b.id)}">
@@ -593,7 +710,7 @@ $("add-p").addEventListener("click", () => {
   catalog.push(p); renderEditor(); scheduleCatalogSave();
   const el = $("e-nom-" + p.id); el.scrollIntoView({ block: "center" }); el.focus();
 });
-function bindReset() { $("reset").onclick = () => inlineConfirm("reset-slot", "Se perderán tus cambios del catálogo.", "Restaurar", () => { catalog = exampleCatalog(); draft.sel = {}; draft.docId = null; saveDraft(); renderEditor(); scheduleCatalogSave(); toast("Catálogo de ejemplo restaurado"); }, bindReset); }
+function bindReset() { $("reset").onclick = () => inlineConfirm("reset-slot", "Se perderán tus cambios del catálogo.", "Restaurar", () => { catalog = exampleCatalog(); draft.secs.forEach(x => x.sel = {}); draft.docId = null; saveDraft(); renderEditor(); scheduleCatalogSave(); toast("Catálogo de ejemplo restaurado"); }, bindReset); }
 bindReset();
 
 function renderClause() {
@@ -617,13 +734,13 @@ function renderAll() { if (!$("view-cat").hidden) renderEditor(); else if (!$("v
 // ---------- arranque ----------
 loadDraft();
 // Ejemplo de partida marcada en el primer uso, para ver la calculadora funcionando.
-if (!draft.seeded && !Object.keys(draft.sel).length) {
+if (!draft.seeded && draft.secs.length === 1 && !Object.keys(S()).length) {
   draft.seeded = true;
   const pick = (re, qty, kids = {}) => {
     const p = catalog.find(x => re.test(x.nombre));
     if (!p) return;
-    draft.sel[p.id] = { on: true, qty, linked: true };
-    (p.hijos || []).forEach((h, i) => { if (i in kids) draft.sel[h.id] = { on: true, qty: kids[i], linked: h.unidad === p.unidad }; });
+    S()[p.id] = { on: true, qty, linked: true };
+    (p.hijos || []).forEach((h, i) => { if (i in kids) S()[h.id] = { on: true, qty: kids[i], linked: h.unidad === p.unidad }; });
   };
   pick(/suelo nuevo/i, 25, { 0: 25, 1: 8, 2: 21 });
   pick(/pintura/i, 85, { 0: 85 });
